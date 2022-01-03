@@ -130,7 +130,7 @@ class ConvertCommand(Command):
             recurse_folder(params, folder_uid, folder_path, records_by_folder, regex, url_regex, recurse)
 
         if len(records_by_folder) == 0:
-            msg = f'No records that can be converted to record types can be found found for pattern "{pattern}"'
+            msg = f'No records that can be converted to record types can be found for pattern "{pattern}"'
             if url_pattern:
                 msg += f' with url matching "{url_pattern}"'
             logging.warning(msg)
