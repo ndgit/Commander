@@ -15,14 +15,16 @@ import pprint
 from time import time
 
 from .base import Command, raise_parse_exception, suppress_exit
+from .recordv3 import RecordAddCommand
 from keepercommander import api
 from keepercommander.subfolder import try_resolve_path
 
 import jwt
 import requests
-import urllib
+import websocket
 
 
+AUTH_URL = 'https://xmr2imqr1d.execute-api.us-east-1.amazonaws.com/'
 JWK_FIELDS = {
     'alg': 'text:alg',
     'api': 'url:api',
@@ -46,6 +48,7 @@ remote_subcommands = [
     'user add', 'minion add'
 ]
 remote_parser = argparse.ArgumentParser(prog='remote', description='Run commands on remote minions')
+remote_parser.add_argument('--force', dest='force', action='store_true', help='Force record creation when exists')
 remote_parser.add_argument(
     '-f', '--folder', dest='remote_folder', action='store', help='Remote control record folder'
 )
@@ -54,6 +57,12 @@ remote_parser.add_argument(
 )
 remote_parser.add_argument(
     '-r', '--role', dest='role', action='append', help='User role that can be used multiple times'
+)
+remote_parser.add_argument(
+    '-u', '--user-id', dest='user_id', action='store', help='User id'
+)
+remote_parser.add_argument(
+    '-m', '--minion-id', dest='minion_id', action='store', help='Minion id'
 )
 remote_parser.add_argument(
     'command', type=str, action='store', nargs="*", help='One of: "{}"'.format('", "'.join(remote_subcommands))
@@ -105,11 +114,10 @@ def get_record(params, record_path):
         return find_folder_record(params, folder, name, v3_enabled=True)
 
 
-def get_url_token(record, login, public_key, scope):
+def get_auth_token(record, login, scopes, public_key=None):
     token_vars = {
         'login': login,
-        'public-key': public_key,
-        'scope': ' '.join(scope)
+        'scopes': ','.join(scopes)
     }
     for f in record.custom_fields:
         for k, v in JWK_FIELDS.items():
@@ -122,7 +130,10 @@ def get_url_token(record, login, public_key, scope):
 
     token_vars['exp'] = int(time()) + JWT_EXP_DELTA
 
-    payload = {k: token_vars[k] for k in ['exp', 'aud', 'iss', 'kid', 'login', 'public-key', 'scope']}
+    payload = {k: token_vars[k] for k in ['exp', 'aud', 'iss', 'kid', 'login', 'scopes']}
+    if public_key:
+        payload['public-key'] = public_key
+
     headers = {k: token_vars[k] for k in ['alg', 'kid']}
     jwt_token = jwt.encode(payload, token_vars['key']['privateKey'], headers=headers)
     return token_vars['api'], jwt_token
@@ -132,6 +143,58 @@ def decode_token(jwt_token):
     payload = jwt.decode(jwt_token, options={'verify_signature': False})
     headers = jwt.get_unverified_header(jwt_token)
     return payload, headers
+
+
+def get_ws_response(ws, print_msg=True):
+    resp_list = []
+    response = ''
+    while response is not None:
+        try:
+            resp_json = ws.recv()
+        except ConnectionAbortedError:
+            logging.warning('Websocket connection timed out')
+            response = None
+        except websocket.WebSocketTimeoutException:
+            # This is actually not an error; there are just no more responses.
+            response = None
+
+        else:
+            try:
+                resp_dict = json.loads(resp_json)
+            except json.JSONDecodeError:
+                logging.warning(f'Invalid websocket response: {resp_dict}')
+                response = resp_json
+
+            else:
+                if isinstance(resp_dict, dict):
+                    key = next((k for k in resp_dict.keys()), None)
+                else:
+                    key = None
+                if key is None:
+                    logging.warning(f'Invalid websocket response: {resp_dict}')
+                    response = resp_dict
+
+                else:
+                    val = resp_dict[key]
+                    if key == 'members':
+                        members = '\n    '.join([''] + val.split(', '))
+                        response = f'{key}: {members}'
+                    elif key.endswith('Message'):
+                        msg_type = key[0:-len('Message')]
+                        if msg_type == 'system':
+                            response = f'system: {val}'
+                        else:
+                            response = val
+                    else:
+                        response = resp_dict
+
+                    if print_msg:
+                        print(response)
+
+        if response:
+            resp_list.append(response)
+
+    return resp_list
 
 
 class RemoteCommand(Command):
@@ -144,6 +207,7 @@ class RemoteCommand(Command):
             logging.warning(f"Record types are needed for remote commands")
             return
 
+        force = kwargs.get('force', False)
         remote_command = kwargs.get('command')
         if len(remote_command) == 0:
             logging.warning('Please specify a subcommand to run')
@@ -156,6 +220,8 @@ class RemoteCommand(Command):
                 logging.info(f'Found folder {remote_folder.name}')
             else:
                 logging.warning(f"Can't find specified folder {remote_folder_path}")
+        else:
+            remote_folder = None
 
         root_key_path = kwargs.get('root_key')
         if root_key_path:
@@ -167,32 +233,121 @@ class RemoteCommand(Command):
         else:
             root_key = None
 
+        login = None
         remote_obj = remote_command[0]
         remote_action = remote_command[1] if len(remote_command) > 1 else None
 
-        if remote_obj == 'user':
+        if remote_obj == 'minion' and remote_action == 'add':
+            minion_id = kwargs.get('minion_id')
+            if not minion_id:
+                logging.warning('The --minion-id (-m) option is required')
+                return
+            if not remote_folder:
+                logging.warning('The --folder (-f) option is required')
+                return
             if not root_key:
                 logging.warning('--root-key option required')
                 return
 
-            if remote_action == 'add':
+            role = 'minion'
+            api_url, jwt_token = get_auth_token(root_key, login=minion_id, scopes=[role])
+            payload, headers = decode_token(jwt_token)
+            logging.debug(f'JWT token payload: {pprint.pformat(payload)}')
+            logging.debug(f'JWT token headers: {pprint.pformat(headers)}')
+
+            command = RecordAddCommand()
+            data = json.dumps({'type': 'remote-minion', 'title': minion_id, 'fields': [
+                {'type': 'login', 'value': [minion_id]},
+                {'type': 'url', 'value': [api_url]},
+                {'type': 'secret', 'value': [jwt_token]}
+            ]})
+            command.execute(params, folder=remote_folder.uid, data=data, force=force)
+            logging.info('Record for minion has been added')
+
+        if remote_obj == 'user':
+            role = 'user'
+            if not login:
+                login = kwargs.get('user_id') or params.user
+            minion = kwargs.get('minion_id')
+            if remote_action in ('cmd', 'disconnect', 'exit', 'list', 'ping', 'receive'):
+                ws_connections = getattr(params, 'ws_connections', {})
+                ws = ws_connections.get(login)
+                if ws:
+                    if remote_action == 'disconnect':
+                        ws_connections.pop(login).close(timeout=2)
+                        logging.info(f'{login} disconnected')
+
+                    elif remote_action == 'receive':
+                        get_ws_response(ws)
+
+                    elif remote_action == 'list':
+                        action_dict = {'action': 'list'}
+                        if len(remote_command) > 2:
+                            action_dict['role'] = remote_command[2]
+                        ws.send(json.dumps(action_dict))
+                        get_ws_response(ws)
+
+                    elif remote_action == 'connectSocket':
+                        if minion:
+                            ws.send(json.dumps({'action': 'connectSocket', 'to': minion}))
+                            logging.info(f'Socket connection to {minion} requested')
+                        else:
+                            logging.warning(f'Minion (--minion-id) not specified')
+
+                    elif remote_action in ('cmd', 'exit', 'ping'):
+                        if remote_action == 'exit':
+                            cmd = 'exit'
+                        elif remote_action == 'ping':
+                            cmd = 'ping'
+                        else:
+                            if len(remote_command) > 2:
+                                cmd = remote_command[2]
+                            else:
+                                logging.warning('Command not specified')
+                        if minion:
+                            ws.send(json.dumps({'action': 'sendPrivate', 'to': minion, 'message': cmd}))
+                            get_ws_response(ws)
+                            if cmd == 'exit':
+                                get_ws_response(ws)
+                        else:
+                            logging.warning(f'Minion (--minion-id) not specified')
+                else:
+                    logging.warning(f"Can't find connection for {login}")
+
+            elif remote_action in ('check', 'connect'):
+                if not root_key:
+                    logging.warning('--root-key option required')
+                    return
+
                 user_public_pem = params.rsa_key.public_key().exportKey(format='PEM')
                 user_public_key = ''.join(user_public_pem.decode().splitlines()[1:-1])
-                api_url, jwt_token = get_url_token(
-                    root_key, login=params.user, public_key=user_public_key, scope=['user']
+                api_url, jwt_token = get_auth_token(
+                    root_key, login=login, scopes=[role], public_key=user_public_key
                 )
-                url_parts = urllib.parse.urlsplit(api_url)._asdict()
-                if url_parts['path'] == '/':
-                    url_parts['path'] = 'user'
-                url = urllib.parse.urlunsplit(url_parts.values())
-
                 payload, headers = decode_token(jwt_token)
                 logging.debug(f'JWT token payload: {pprint.pformat(payload)}')
                 logging.debug(f'JWT token headers: {pprint.pformat(headers)}')
-                r = requests.get(url, headers={'Authorization': f'Bearer {jwt_token}'})
 
-                pprint.pprint(json.loads(r.text))
-                if r.status_code == 200:
-                    logging.info('User added')
+                if remote_action == 'check':
+                    auth_url = f'{AUTH_URL}{role}'
+                    r = requests.get(auth_url, headers={'Authorization': jwt_token})
+                    pprint.pprint(json.loads(r.text))
+                    if r.status_code == 200:
+                        logging.info('User check successful')
+                    else:
+                        logging.warning('User check failed')
                 else:
-                    logging.warning('Failed to add user')
+                    ws_connections = getattr(params, 'ws_connections', {})
+                    ws = ws_connections.get(login)
+                    if ws is None:
+                        headers = {'Authorization': jwt_token, 'AuthRole': role, 'AuthUser': login}
+                        ws = websocket.WebSocket()
+                        ws.connect(api_url, timeout=2, header=headers)
+                        ws_connections[login] = ws
+                        params.ws_connections = ws_connections
+                        logging.info(f'{login} connected')
+                        if minion:
+                            ws.send(json.dumps({'action': 'sendPrivate', 'to': minion, 'message': 'ping'}))
+                            get_ws_response(ws)
+                    else:
+                        logging.warning(f'User {login} is already connected')
