@@ -23,6 +23,7 @@ install_requires = [
     'pysocks',
     'requests',
     'tabulate',
+    'websocket-client',
     'keeper-secrets-manager-core>=16.2.0'
 ]
 adpasswd_requires = ['ldap3']
