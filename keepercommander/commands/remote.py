@@ -146,7 +146,6 @@ def decode_token(jwt_token):
 
 
 def get_ws_response(ws, print_msg=True):
-    resp_list = []
     response = ''
     while response is not None:
         try:
@@ -166,35 +165,28 @@ def get_ws_response(ws, print_msg=True):
                 response = resp_json
 
             else:
-                if isinstance(resp_dict, dict):
-                    key = next((k for k in resp_dict.keys()), None)
-                else:
-                    key = None
-                if key is None:
-                    logging.warning(f'Invalid websocket response: {resp_dict}')
-                    response = resp_dict
-
-                else:
-                    val = resp_dict[key]
-                    if key == 'members':
-                        members = '\n    '.join([''] + val.split(', '))
-                        response = f'{key}: {members}'
-                    elif key.endswith('Message'):
-                        msg_type = key[0:-len('Message')]
-                        if msg_type == 'system':
-                            response = f'system: {val}'
-                        else:
-                            response = val
-                    else:
-                        response = resp_dict
+                if isinstance(resp_dict, dict) and len(resp_dict) > 0:
+                    response = []
+                    members = resp_dict.pop('members', False)
+                    message = resp_dict.pop('message', False)
+                    command = resp_dict.pop('command', False)
+                    if members:
+                        member_list = '\n    '.join([''] + members)
+                        response.append(f'members: {member_list}')
+                    if command:
+                        command_str = ' '.join(command)
+                        response.append(f'command: {command_str}')
+                    if message:
+                        msg_from = resp_dict.pop('from', 'anonymous')
+                        response.append(f'{msg_from}: {message}')
+                    if len(resp_dict) > 0:
+                        response.append(json.dumps(resp_dict))
 
                     if print_msg:
-                        print(response)
-
-        if response:
-            resp_list.append(response)
-
-    return resp_list
+                        print('\n'.join(response))
+                else:
+                    logging.warning(f'Invalid websocket response: {resp_dict}')
+                    response = resp_dict
 
 
 class RemoteCommand(Command):
@@ -274,7 +266,7 @@ class RemoteCommand(Command):
                 ws = ws_connections.get(login)
                 if ws:
                     if remote_action == 'disconnect':
-                        ws_connections.pop(login).close(timeout=2)
+                        ws_connections.pop(login).close(timeout=3)
                         logging.info(f'{login} disconnected')
 
                     elif remote_action == 'receive':
@@ -295,19 +287,13 @@ class RemoteCommand(Command):
                             logging.warning(f'Minion (--minion-id) not specified')
 
                     elif remote_action in ('cmd', 'exit', 'ping'):
-                        if remote_action == 'exit':
-                            cmd = 'exit'
-                        elif remote_action == 'ping':
-                            cmd = 'ping'
-                        else:
-                            if len(remote_command) > 2:
-                                cmd = remote_command[2]
-                            else:
-                                logging.warning('Command not specified')
+                        cmd = remote_command[2:] if remote_action == 'cmd' else remote_command[1:]
                         if minion:
-                            ws.send(json.dumps({'action': 'sendPrivate', 'to': minion, 'message': cmd}))
+                            ws.send(json.dumps(
+                                {'action': 'send', 'type': 'command', 'to': minion, 'message': cmd}
+                            ))
                             get_ws_response(ws)
-                            if cmd == 'exit':
+                            if cmd[0] == 'exit':
                                 get_ws_response(ws)
                         else:
                             logging.warning(f'Minion (--minion-id) not specified')
@@ -342,12 +328,14 @@ class RemoteCommand(Command):
                     if ws is None:
                         headers = {'Authorization': jwt_token, 'AuthRole': role, 'AuthUser': login}
                         ws = websocket.WebSocket()
-                        ws.connect(api_url, timeout=2, header=headers)
+                        ws.connect(api_url, timeout=3, header=headers)
                         ws_connections[login] = ws
                         params.ws_connections = ws_connections
                         logging.info(f'{login} connected')
                         if minion:
-                            ws.send(json.dumps({'action': 'sendPrivate', 'to': minion, 'message': 'ping'}))
+                            ws.send(json.dumps(
+                                {'action': 'send', 'type': 'command', 'to': minion, 'message': ['ping']}
+                            ))
                             get_ws_response(ws)
                     else:
                         logging.warning(f'User {login} is already connected')
