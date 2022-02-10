@@ -1720,6 +1720,7 @@ class DeleteCorruptedCommand(Command):
         else:
             logging.info('No corrupted records are found.')
 
+
 class VerifyRecordsCommand(Command):
     def execute(self, params, **kwargs):
         records_to_fix = {}
@@ -1739,6 +1740,7 @@ class VerifyRecordsCommand(Command):
             is_broken = False
             for field in itertools.chain(data.get('fields', []), data.get('custom', [])):
                 value = field.get('value')
+                # value is not list
                 if not isinstance(value, list):
                     is_broken = True
                     if value:
@@ -1746,6 +1748,7 @@ class VerifyRecordsCommand(Command):
                     else:
                         value = []
                     field['value'] = value
+                # fix credit card expiration on paymentCard
                 if field.get('type', '') == 'paymentCard':
                     for card in field['value']:
                         if isinstance(card, dict):
@@ -1763,12 +1766,19 @@ class VerifyRecordsCommand(Command):
                         else:
                             field['value'] = []
                             break
+                # date field type should contain int value
                 if field.get('type', '') == 'date':
                     orig_dates = field['value']
                     tested_dates = [x for x in orig_dates if isinstance(x, int)]
                     if len(tested_dates) < len(orig_dates):
                         field['value'] = tested_dates
                         is_broken = True
+
+            has_unknown_type = any((x for x in data.get('custom', []) if x.get('type') == 'unknownType'))
+            if has_unknown_type:
+                data['custom'] = [x for x in data['custom'] if x.get('type') != 'unknownType']
+                is_broken = True
+
             if is_broken:
                 records_to_fix[record_uid] = data
 
