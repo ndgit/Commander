@@ -65,6 +65,10 @@ remote_parser.add_argument(
     '-m', '--minion-id', dest='minion_id', action='store', help='Minion id'
 )
 remote_parser.add_argument(
+    '-e', '--expire-token-delta', type=int, dest='exp_delta', action='store', default=JWT_EXP_DELTA,
+    help='Expiration delta of minion authentication token in seconds'
+)
+remote_parser.add_argument(
     'command', type=str, action='store', nargs="*", help='One of: "{}"'.format('", "'.join(remote_subcommands))
 )
 remote_parser.error = raise_parse_exception
@@ -114,7 +118,7 @@ def get_record(params, record_path):
         return find_folder_record(params, folder, name, v3_enabled=True)
 
 
-def get_auth_token(record, login, scopes, public_key=None):
+def get_auth_token(record, login, scopes, public_key=None, exp_delta=JWT_EXP_DELTA):
     token_vars = {
         'login': login,
         'scopes': ','.join(scopes)
@@ -128,7 +132,7 @@ def get_auth_token(record, login, scopes, public_key=None):
             token_vars[k] = record.login_url
             break
 
-    token_vars['exp'] = int(time()) + JWT_EXP_DELTA
+    token_vars['exp'] = int(time()) + exp_delta
 
     payload = {k: token_vars[k] for k in ['exp', 'aud', 'iss', 'kid', 'login', 'scopes']}
     if public_key:
@@ -242,7 +246,8 @@ class RemoteCommand(Command):
                 return
 
             role = 'minion'
-            api_url, jwt_token = get_auth_token(root_key, login=minion_id, scopes=[role])
+            jwt_exp_delta = kwargs.get('exp_delta', JWT_EXP_DELTA)
+            api_url, jwt_token = get_auth_token(root_key, login=minion_id, scopes=[role], exp_delta=jwt_exp_delta)
             payload, headers = decode_token(jwt_token)
             logging.debug(f'JWT token payload: {pprint.pformat(payload)}')
             logging.debug(f'JWT token headers: {pprint.pformat(headers)}')
