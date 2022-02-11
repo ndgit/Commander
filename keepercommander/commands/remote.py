@@ -170,21 +170,25 @@ def get_ws_response(ws, print_msg=True):
 
             else:
                 if isinstance(resp_dict, dict) and len(resp_dict) > 0:
-                    response = []
-                    members = resp_dict.pop('members', False)
                     message = resp_dict.pop('message', False)
-                    command = resp_dict.pop('command', False)
-                    if members:
-                        member_list = '\n    '.join([''] + members)
-                        response.append(f'members: {member_list}')
-                    if command:
-                        command_str = ' '.join(command)
-                        response.append(f'command: {command_str}')
-                    if message:
-                        msg_from = resp_dict.pop('from', 'anonymous')
-                        response.append(f'{msg_from}: {message}')
-                    if len(resp_dict) > 0:
-                        response.append(json.dumps(resp_dict))
+                    rotate_log = message.get('rotate_log', False) if isinstance(message, dict) else False
+                    if rotate_log:
+                        response = rotate_log
+                    else:
+                        response = []
+                        members = resp_dict.pop('members', False)
+                        command = resp_dict.pop('command', False)
+                        if members:
+                            member_list = '\n    '.join([''] + members)
+                            response.append(f'members: {member_list}')
+                        if command:
+                            command_str = ' '.join(command)
+                            response.append(f'command: {command_str}')
+                        if message:
+                            msg_from = resp_dict.pop('from', 'anonymous')
+                            response.append(f'{msg_from}: {message}')
+                        if len(resp_dict) > 0:
+                            response.append(json.dumps(resp_dict))
 
                     if print_msg:
                         print('\n'.join(response))
