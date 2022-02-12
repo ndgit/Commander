@@ -19,9 +19,9 @@ from .recordv3 import RecordAddCommand
 from keepercommander import api
 from keepercommander.subfolder import try_resolve_path
 
-import jwt
 import requests
 import websocket
+from jwcrypto.jwt import JWK, JWT
 
 
 AUTH_URL = 'https://xmr2imqr1d.execute-api.us-east-1.amazonaws.com/'
@@ -139,13 +139,16 @@ def get_auth_token(record, login, scopes, public_key=None, exp_delta=JWT_EXP_DEL
         payload['public-key'] = public_key
 
     headers = {k: token_vars[k] for k in ['alg', 'kid']}
-    jwt_token = jwt.encode(payload, token_vars['key']['privateKey'], headers=headers)
-    return token_vars['api'], jwt_token
+    jwt_token = JWT(header=headers, claims=payload)
+    key = JWK.from_pem(token_vars['key']['privateKey'].encode())
+    jwt_token.make_signed_token(key)
+    return token_vars['api'], jwt_token.serialize()
 
 
-def decode_token(jwt_token):
-    payload = jwt.decode(jwt_token, options={'verify_signature': False})
-    headers = jwt.get_unverified_header(jwt_token)
+def decode_token(raw_jwt_token):
+    jwt_token = JWT(jwt=raw_jwt_token).token
+    payload = json.loads(jwt_token.objects['payload'])
+    headers = jwt_token.jose_header
     return payload, headers
 
 
