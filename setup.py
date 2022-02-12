@@ -14,7 +14,7 @@ install_requires = [
     'asciitree',
     'colorama',
     'cryptography>=3.4.8',
-    'PyJWT',
+    'jwcrypto',
     'pykeepass',
     'prompt_toolkit',
     'protobuf>=3.18.0',
