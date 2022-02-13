@@ -9,6 +9,7 @@
 # Contact: ops@keepersecurity.com
 #
 import argparse
+import hashlib
 import json
 import logging
 import pprint
@@ -118,7 +119,7 @@ def get_record(params, record_path):
         return find_folder_record(params, folder, name, v3_enabled=True)
 
 
-def get_auth_token(record, login, scopes, public_key=None, exp_delta=JWT_EXP_DELTA):
+def get_auth_token(record, login, scopes, ent_id=None, public_key=None, exp_delta=JWT_EXP_DELTA):
     token_vars = {
         'login': login,
         'scopes': ','.join(scopes)
@@ -135,6 +136,8 @@ def get_auth_token(record, login, scopes, public_key=None, exp_delta=JWT_EXP_DEL
     token_vars['exp'] = int(time()) + exp_delta
 
     payload = {k: token_vars[k] for k in ['exp', 'aud', 'iss', 'kid', 'login', 'scopes']}
+    if ent_id:
+        payload['ent-id'] = hashlib.sha256(ent_id.to_bytes(4, 'big')).hexdigest()
     if public_key:
         payload['public-key'] = public_key
 
@@ -237,6 +240,7 @@ class RemoteCommand(Command):
             root_key = None
 
         login = None
+        ent_id = params.license.get('enterprise_id')
         remote_obj = remote_command[0]
         remote_action = remote_command[1] if len(remote_command) > 1 else None
 
@@ -254,7 +258,9 @@ class RemoteCommand(Command):
 
             role = 'minion'
             jwt_exp_delta = kwargs.get('exp_delta', JWT_EXP_DELTA)
-            api_url, jwt_token = get_auth_token(root_key, login=minion_id, scopes=[role], exp_delta=jwt_exp_delta)
+            api_url, jwt_token = get_auth_token(
+                root_key, login=minion_id, scopes=[role], ent_id=ent_id, exp_delta=jwt_exp_delta
+            )
             payload, headers = decode_token(jwt_token)
             logging.debug(f'JWT token payload: {pprint.pformat(payload)}')
             logging.debug(f'JWT token headers: {pprint.pformat(headers)}')
@@ -320,7 +326,7 @@ class RemoteCommand(Command):
                 user_public_pem = params.rsa_key.public_key().exportKey(format='PEM')
                 user_public_key = ''.join(user_public_pem.decode().splitlines()[1:-1])
                 api_url, jwt_token = get_auth_token(
-                    root_key, login=login, scopes=[role], public_key=user_public_key
+                    root_key, login=login, scopes=[role], ent_id=ent_id, public_key=user_public_key
                 )
                 payload, headers = decode_token(jwt_token)
                 logging.debug(f'JWT token payload: {pprint.pformat(payload)}')
